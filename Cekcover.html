@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <title>📄 Cek Tampil Cover dari Excel</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+</head>
+<body>
+  <h2>📥 Cek Cover dari Excel (UUID + Judul + URL)</h2>
+
+  <input type="file" id="excelInput" accept=".xlsx" />
+  <button onclick="cekCoverExcel()">🚀 Mulai Proses</button>
+
+  <br><br>
+  <table border="1" id="hasilTable">
+    <thead>
+      <tr><th>No</th><th>UUID</th><th>Judul</th><th>URL</th><th>Status</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <br>
+  <button onclick="exportHasil()">⬇️ Export ke Excel</button>
+
+  <script>
+    let hasilEkstraksi = [];
+
+    async function cekCoverExcel() {
+      const fileInput = document.getElementById('excelInput');
+      if (fileInput.files.length === 0) {
+        alert('❗ Pilih file Excel dulu.');
+        return;
+      }
+
+      const file = fileInput.files[0];
+      const data = await file.arrayBuffer();
+      const workbook = XLSX.read(data, { type: "array" });
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+
+      const header = rows[0];
+      const uuidIndex = header.indexOf("UUID");
+      const judulIndex = header.indexOf("Judul");
+      const urlIndex = header.indexOf("URL");
+
+      if (uuidIndex === -1 || urlIndex === -1 || judulIndex === -1) {
+        alert("❌ Kolom 'UUID', 'Judul', dan 'URL' harus ada.");
+        return;
+      }
+
+      hasilEkstraksi = [];
+      const tbody = document.querySelector("#hasilTable tbody");
+      tbody.innerHTML = '';
+
+      for (let i = 1; i < rows.length; i++) {
+        const row = rows[i];
+        const uuid = row[uuidIndex];
+        const judul = row[judulIndex];
+        const url = row[urlIndex];
+        if (!uuid || !url) continue;
+
+        const status = await deteksiCoverBeneran(url);
+
+        hasilEkstraksi.push({ UUID: uuid, Judul: judul, URL: url, Status: status });
+
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${i}</td><td>${uuid}</td><td>${judul}</td><td>${url}</td><td>${status}</td>`;
+        tbody.appendChild(tr);
+      }
+    }
+
+    async function deteksiCoverBeneran(url) {
+      try {
+        const res = await fetch(url, { method: 'HEAD' });
+        if (!res.ok) return '❌ Gagal akses (HTTP ' + res.status + ')';
+
+        const type = res.headers.get('Content-Type') || '';
+        if (type.includes('pdf')) return await cekPDF(url);
+        if (type.includes('image')) return await cekGambar(url);
+        return '❌ Format tidak didukung';
+      } catch (err) {
+        return '❌ Gagal buka: ' + err.message;
+      }
+    }
+
+    async function cekPDF(url) {
+      try {
+        const loadingTask = pdfjsLib.getDocument({ url, withCredentials: false });
+        const pdf = await loadingTask.promise;
+        const page = await pdf.getPage(1);
+        const text = await page.getTextContent();
+        return text.items.length > 0 ? '✅ Cover tampil (PDF)' : '❌ Kosong (PDF)';
+      } catch (e) {
+        return '❌ Gagal buka PDF';
+      }
+    }
+
+    function cekGambar(url) {
+      return new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => resolve('✅ Cover tampil (image)');
+        img.onerror = () => resolve('❌ Gagal tampil (image rusak)');
+        img.src = url;
+      });
+    }
+
+    function exportHasil() {
+      if (hasilEkstraksi.length === 0) return alert('❗ Belum ada hasil.');
+
+      const wb = XLSX.utils.book_new();
+      const ws = XLSX.utils.json_to_sheet(hasilEkstraksi);
+      XLSX.utils.book_append_sheet(wb, ws, 'Hasil');
+
+      XLSX.writeFile(wb, 'hasil_cek_cover.xlsx');
+    }
+  </script>
+</body>
+</html>
