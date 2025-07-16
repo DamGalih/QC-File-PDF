@@ -24,20 +24,100 @@
 <button onclick="extractMetadataFromExcel()">Ambil Metadata dari Excel</button>
 
   <script>
-    function exportToExcel() {
+    function calculateSimilarity(a, b) {
+  if (!a || !b) return 0;
+  a = a.toLowerCase().trim();
+  b = b.toLowerCase().trim();
+
+  const longer = a.length > b.length ? a : b;
+  const shorter = a.length > b.length ? b : a;
+  const longerLength = longer.length;
+
+  if (longerLength === 0) return 1.0;
+
+  const distance = levenshteinDistance(longer, shorter);
+  return (longerLength - distance) / longerLength;
+}
+
+function levenshteinDistance(a, b) {
+  const matrix = Array.from({ length: b.length + 1 }, () => []);
+
+  for (let i = 0; i <= b.length; i++) matrix[i][0] = i;
+  for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
+
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      matrix[i][j] =
+        b[i - 1] === a[j - 1]
+          ? matrix[i - 1][j - 1]
+          : Math.min(
+              matrix[i - 1][j - 1] + 1, // substitution
+              matrix[i][j - 1] + 1,     // insertion
+              matrix[i - 1][j] + 1      // deletion
+            );
+    }
+  }
+
+  return matrix[b.length][a.length];
+}
+
+ let hasilEkstraksi = [];
+
+// 🔍 Evaluasi hasil parsing vs referensi Excel
+function compareWithReference(meta, referensi) {
+  const catatan = [];
+
+  const judulRef = String(referensi.judul || '').trim().toLowerCase();
+  const penulisRef = String(referensi.penulis || '').trim().toLowerCase();
+  const isbnRef = String(referensi.isbn || '').replace(/[\s\-]/g, '');
+
+  const hasilJudul = String(meta.title || '').trim().toLowerCase();
+  const hasilPenulis = String(meta.author || '').trim().toLowerCase();
+  const hasilISBN = [...(meta.isbnList || []), ...(meta.eisbnList || [])].map(i =>
+    String(i).replace(/[\s\-]/g, '')
+  );
+
+  // 🔍 Similarity logic
+  const judulScore = calculateSimilarity(judulRef, hasilJudul);
+  const penulisScore = calculateSimilarity(penulisRef, hasilPenulis);
+
+  if (judulRef && hasilJudul && judulScore < 0.75) {
+    catatan.push(`Judul tidak cukup mirip (Skor: ${Math.round(judulScore * 100)}%)`);
+  }
+
+  if (penulisRef && hasilPenulis && penulisScore < 0.8) {
+    catatan.push(`Penulis tidak cukup mirip (Skor: ${Math.round(penulisScore * 100)}%)`);
+  }
+
+  if (isbnRef && !hasilISBN.includes(isbnRef)) {
+    catatan.push('ISBN tidak cocok dengan referensi');
+  }
+
+  const status = catatan.length === 0 ? '✅ Terverifikasi' : '❗ Ada Perbedaan';
+  return { status, catatan: catatan.join('; ') };
+}
+
+
+// 📤 Ekspor ke Excel
+function exportToExcel() {
   if (hasilEkstraksi.length === 0) return alert('❗ Belum ada data hasil ekstraksi.');
 
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet([
-    ['URL', 'Judul', 'Penulis', 'Tahun', 'ISBN', 'EISBN', 'Bookmark', 'Layout'],
+    [
+      'UUID', 'URL', 'Judul', 'Penulis', 'Tahun', 'ISBN', 'EISBN',
+      'Bookmark', 'Cover', 'Layout', 'Properties',
+      'Status QC', 'Catatan QC'
+    ],
     ...hasilEkstraksi
   ]);
+
   XLSX.utils.book_append_sheet(wb, ws, 'Hasil Ekstraksi');
   XLSX.writeFile(wb, 'hasil_ekstraksi_metadata.xlsx');
 }
 
-  let hasilEkstraksi = []; // Untuk menyimpan hasil ekstraksi dari semua URL
-    async function extractMetadataFromExcel() {
+// 🚀 Proses Ekstraksi dari Excel
+async function extractMetadataFromExcel() {
   const input = document.getElementById('excelInput');
   const outputEl = document.getElementById('output');
   const file = input.files[0];
@@ -46,48 +126,72 @@
   const reader = new FileReader();
   reader.onload = async (e) => {
     const workbook = XLSX.read(e.target.result, { type: 'binary' });
-    const sheetName = workbook.SheetNames[0];
-    const sheet = workbook.Sheets[sheetName];
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const data = XLSX.utils.sheet_to_json(sheet, { header: 1 });
 
-    const urls = data.flat().filter(cell => typeof cell === 'string' && cell.startsWith('http'));
-    if (urls.length === 0) {
-      outputEl.textContent = '❌ Tidak ada URL ditemukan dalam file Excel.';
+    const headers = data[0];
+    const uuidIndex = headers.findIndex(h => /uuid/i.test(h));
+    const urlIndex = headers.findIndex(h => /url/i.test(h));
+    const titleIndex = headers.findIndex(h => /judul/i.test(h));
+    const authorIndex = headers.findIndex(h => /penulis/i.test(h));
+    const isbnIndex = headers.findIndex(h => /\bisbn\b/i.test(h) && !/e-?isbn/i.test(h));
+
+    if (uuidIndex === -1 || urlIndex === -1) {
+      outputEl.textContent = '❌ Kolom UUID dan URL harus tersedia di Excel.';
       return;
     }
 
-    outputEl.textContent = `📑 Ditemukan ${urls.length} file. Memulai ekstraksi...\n`;
+    const dataRows = data.slice(1); // skip header
+    outputEl.textContent = `📑 Ditemukan ${dataRows.length} file. Memulai ekstraksi...\n`;
     hasilEkstraksi = [];
-    
-    for (let i = 0; i < urls.length; i++) {
-      const url = urls[i];
-      outputEl.textContent += `\n📎 Memproses [${i + 1}/${urls.length}]: ${url}`;
+
+    for (let i = 0; i < dataRows.length; i++) {
+      const row = dataRows[i];
+      const uuid = row[uuidIndex] || '';
+      const url = row[urlIndex];
+      if (typeof url !== 'string' || !url.startsWith('http')) continue;
+
+      outputEl.textContent += `\n📎 Memproses [${i + 1}/${dataRows.length}]: ${url}`;
+      const individualOutput = document.createElement('pre');
+      outputEl.appendChild(individualOutput);
+
       try {
-        const individualOutput = document.createElement('pre');
-        outputEl.appendChild(individualOutput);
-         console.log("🛠 Memanggil extractFromPDF untuk:", url);
         await extractFromPDF(url, individualOutput, true);
-        if (individualOutput.dataset && individualOutput.dataset.metadata) {
-  const meta = JSON.parse(individualOutput.dataset.metadata);
-  hasilEkstraksi.push([
-    url,
-    meta.title,
-    meta.author,
-    meta.year,
-    meta.isbnList.join(', '),
-    meta.eisbnList.join(', '),
-    meta.bookmark,
-    meta.layout
-  ]);
-} else {outputEl.textContent += `\n⚠️ Tidak ada metadata ditemukan pada file ke-${i + 1}`;
 
-}
+        if (individualOutput.dataset?.metadata) {
+          const meta = JSON.parse(individualOutput.dataset.metadata);
 
+          const referensi = {
+            judul: titleIndex >= 0 ? row[titleIndex] || '' : '',
+            penulis: authorIndex >= 0 ? row[authorIndex] || '' : '',
+            isbn: isbnIndex >= 0 ? row[isbnIndex] || '' : ''
+          };
+
+          const hasilPerbandingan = compareWithReference(meta, referensi);
+
+          hasilEkstraksi.push([
+            uuid,
+            url,
+            meta.title,
+            meta.author,
+            meta.year,
+            meta.isbnList.join(', '),
+            meta.eisbnList.join(', '),
+            meta.bookmark,
+            meta.cover,
+            meta.layout,
+            meta.properties,
+            hasilPerbandingan.status,
+            hasilPerbandingan.catatan
+          ]);
+        } else {
+          outputEl.textContent += `\n⚠️ Tidak ada metadata ditemukan pada file ke-${i + 1}`;
+        }
       } catch (err) {
         outputEl.textContent += `\n❌ Gagal memproses: ${err.message}`;
       }
     }
-    // Tambahkan tombol untuk ekspor setelah semua diproses
+
     const exportBtn = document.createElement('button');
     exportBtn.textContent = '⬇️ Ekspor ke Excel';
     exportBtn.onclick = exportToExcel;
@@ -96,6 +200,7 @@
 
   reader.readAsBinaryString(file);
 }
+
 
 
     function normalizeSpacedText(text) {
@@ -114,16 +219,31 @@ function isValidISBN10(isbn) {
   return sum % 11 === 0;
 }
 
-    function splitIntoIsbns(raw) {
-      const clean = raw.replace(/[^\d]/g, '');
-      const result = [];
-      for (let i = 0; i <= clean.length - 13; i++) {
-        const part = clean.slice(i, i + 13);
-        if (/^97[89]\d{10}$/.test(part)) result.push(part);
-      }
-      return result;
-    }
+    function splitIntoIsbns(str) {
+  const clean = str.replace(/[\s\-–]/g, '');
+  const result = [];
 
+  // Cari ISBN-13 (978 atau 979, diikuti 10 digit)
+  // Ini akan mencari semua kemunculan yang valid
+  const isbn13Matches = [...clean.matchAll(/(97[89]\d{10})/g)];
+  for (const match of isbn13Matches) {
+    if (!result.includes(match[1])) { // Hindari duplikat
+      result.push(match[1]);
+    }
+  }
+
+  // Cari ISBN-10 (10 digit, terakhir bisa X)
+  // Perhatikan: ini akan mendeteksi di mana pun di string
+  // Jika Anda hanya ingin ISBN-10 terpisah, perlu regex yang lebih ketat
+  const isbn10Matches = [...clean.matchAll(/\b\d{9}[\dX]\b/gi)];
+  for (const match of isbn10Matches) {
+    if (isValidISBN10(match[0].toUpperCase()) && !result.includes(match[0].toUpperCase())) {
+      result.push(match[0].toUpperCase());
+    }
+  }
+
+  return result;
+}
     async function extractMetadata() {
       const fileInput = document.getElementById('fileInput');
       const outputEl = document.getElementById('output');
@@ -141,13 +261,12 @@ function isValidISBN10(isbn) {
       }
     }
 
-async function extractFromPDF(fileOrUrl, outputEl, isUrl = false) {
-  
+    
 
+async function extractFromPDF(fileOrUrl, outputEl, isUrl = false) {
   outputEl.textContent = '⏳ Memproses PDF...';
   try {
     let pdfData;
-
     if (isUrl) {
       const response = await fetch(fileOrUrl);
       if (!response.ok) throw new Error(`Gagal fetch PDF: ${response.status}`);
@@ -160,195 +279,307 @@ async function extractFromPDF(fileOrUrl, outputEl, isUrl = false) {
         reader.readAsArrayBuffer(fileOrUrl);
       });
     }
-
+    
     const pdf = await pdfjsLib.getDocument({ data: pdfData }).promise;
     const metadata = await pdf.getMetadata();
 
-      // 📌 Bookmark detection
-      let bookmarkInfo = '❌ Tidak ditemukan';
-      try {
-        const outlines = await pdf.getOutline() || [];
-        const outlineTitles = outlines.map(item => item.title?.toLowerCase() || '');
+    // 📌 Bookmark & Cover detection
+    let bookmarkInfo = '❌ Tidak ditemukan';
+    let coverInfo = '❌ Tidak ditemukan';
+    try {
+      const outlines = await pdf.getOutline() || [];
+      const outlineTitles = outlines.map(item => item.title?.toLowerCase() || '');
 
-        const requiredKeywords = [
-          'hak cipta',
-          'credit title',
-          'impressum',
-          'katalog dalam terbitan [kdt]',
-          'kdt',
-          'halaman copyright',
-          'halaman impressum',
-          'halaman impresum',
-          'impresum'
-        ];
+      const requiredKeywords = [
+        'hak cipta', 'credit title', 'impressum',
+        'katalog dalam terbitan [kdt]', 'kdt',
+        'halaman copyright', 'halaman impressum', 'halaman impresum', 'impresum', 'identitas buku', 'copyright', 'tahun terbit dan isbn (pdf)'
+      ];
+      const coverKeywords = ['sampul', 'cover', 'halaman sampul', 'halaman cover'];
 
-        const foundKeyword = requiredKeywords.find(k =>
-          outlineTitles.some(title => title.includes(k))
-        );
+      const foundKeyword = requiredKeywords.find(k => outlineTitles.some(title => title.includes(k)));
+      const foundCover = coverKeywords.find(k => outlineTitles.some(title => title.includes(k)));
 
-        if (foundKeyword) {
-          bookmarkInfo = `✔️ Ya (${foundKeyword})`;
-        } else {
-          bookmarkInfo = '❌ Tidak ditemukan (tidak mengandung Hak Cipta / Credit Title / Impressum / KDT / Halaman Copyright / Halaman Impressum / Halaman Impresum / impresum)';
-        }
-      } catch (e) {
-        bookmarkInfo = `⚠️ Gagal membaca bookmark: ${e.message}`;
+      if (foundKeyword) {
+        bookmarkInfo = `✔️ Ya (${foundKeyword})`;
       }
-
-      // 📐 Ukuran layout (lebar x tinggi) konsisten atau tidak
-      let layoutInfo = '❌ Tidak seragam';
-      try {
-        const pageSizes = [];
-
-        for (let i = 1; i <= pdf.numPages; i++) {
-          const page = await pdf.getPage(i);
-          const { width, height } = page.getViewport({ scale: 1 });
-          pageSizes.push({ width: Math.round(width), height: Math.round(height) });
-        }
-
-        const firstSize = `${pageSizes[0].width}x${pageSizes[0].height}`;
-        const isClose = (a, b, tolerance = 1) => Math.abs(a - b) <= tolerance;
-        const allSame = pageSizes.every(size =>
-        isClose(size.width, pageSizes[0].width) &&
-        isClose(size.height, pageSizes[0].height)
-        ); 
-
-        layoutInfo = allSame
-          ? `✔️ Ya (${firstSize} untuk semua halaman)`
-          : `❌ Tidak seragam (contoh: ${firstSize}, dst)`;
-      } catch (e) {
-        layoutInfo = `⚠️ Gagal membaca ukuran layout: ${e.message}`;
+      if (foundCover) {
+        coverInfo = `✔️ Ya (${foundCover})`;
       }
+    } catch (e) {
+      bookmarkInfo = `⚠️ Gagal membaca bookmark: ${e.message}`;
+    }
 
-      const docInfo = metadata.info || {};
-      const metaTitle = docInfo.Title?.trim() || '';
-      const metaAuthor = docInfo.Author?.trim() || '';
-      const metaDate = docInfo.CreationDate || '';
-
-      let isbnList = [];
-      let eisbnList = [];
-      let titleText = '';
-      let authorText = '';
-
+    // 📐 Layout detection
+    let layoutInfo = '❌ Tidak seragam';
+    try {
+      const pageSizes = [];
       for (let i = 1; i <= pdf.numPages; i++) {
         const page = await pdf.getPage(i);
-        const content = await page.getTextContent();
-        const text = content.items.map(item => item.str).join('\n');
-        const lines = text.split('\n');
-
-        let previousLineISBN = null;
-
-        for (let j = 0; j < lines.length; j++) {
-          const line = lines[j].trim();
-          const nextLine = lines[j + 1]?.trim() || '';
-
-          const matchISBN13 = line.match(/(97[89][\d\s\-–]{9,})/g) || [];
-const matchISBN10 = line.match(/\b[\d]{9}[\dXx]\b/g) || [];
-const allMatches = [...matchISBN13, ...matchISBN10];
-
-const isEISBN = /(eisbn|elektronik|digital|epub|ebook|\(epub\)|\(pdf\)|isbn\s*\[\s*e\s*\]|isbn\s*\(\s*e\s*\))/i.test(line + nextLine);
-
-for (const raw of allMatches) {
-  const numbers13 = splitIntoIsbns(raw);
-  const isISBN10 = isValidISBN10(raw);
-
-  if (numbers13.length > 0) {
-    for (const num of numbers13) {
-      if (isEISBN || previousLineISBN === 'EISBN') {
-        if (!eisbnList.includes(num)) eisbnList.push(num);
-      } else {
-        if (!isbnList.includes(num) && !eisbnList.includes(num)) isbnList.push(num);
+        const { width, height } = page.getViewport({ scale: 1 });
+        pageSizes.push({ width: Math.round(width), height: Math.round(height) });
       }
+      const firstSize = `${pageSizes[0].width}x${pageSizes[0].height}`;
+      const isClose = (a, b, tolerance = 3) => Math.abs(a - b) <= tolerance;
+      const allSame = pageSizes.every(size =>
+        isClose(size.width, pageSizes[0].width) &&
+        isClose(size.height, pageSizes[0].height)
+      );
+      layoutInfo = allSame
+        ? `✔️ Ya (${firstSize} untuk semua halaman)`
+        : `❌ Tidak seragam (contoh: ${firstSize}, dst)`;
+    } catch (e) {
+      layoutInfo = `⚠️ Gagal membaca ukuran layout: ${e.message}`;
     }
-  } else if (isISBN10) {
-    const clean10 = raw.replace(/[\- ]/g, '').toUpperCase();
-    if (isEISBN || previousLineISBN === 'EISBN') {
-      if (!eisbnList.includes(clean10)) eisbnList.push(clean10);
+ 
+
+    // 📚 Metadata & Konten
+    const docInfo = metadata.info || {};
+    const metaTitle = docInfo.Title?.trim() || '';
+    const metaAuthor = docInfo.Author?.trim() || '';
+    const metaDate = docInfo.CreationDate || '';
+    let year = (metaDate.match(/\d{4}/) || [])[0] || '';
+    let detectedYears = [];
+
+    let isbnList = [];
+    let eisbnList = [];
+    let titleText = '';
+    let authorText = '';
+
+    // 📌 Deteksi ketersediaan document properties
+let propertiesInfo = [];
+if (metaTitle) propertiesInfo.push('Title');
+if (metaAuthor) propertiesInfo.push('Author');
+if (metaDate) propertiesInfo.push('CreationDate');
+
+const documentProperties = propertiesInfo.length > 0
+  ? `✔️ Ada (${propertiesInfo.join(', ')})`
+  : '❌ Tidak ditemukan';
+
+
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      const text = content.items.map(item => item.str).join('\n');
+      console.log(`📄 [Halaman ${i}]`);
+      console.log(text);
+      const lines = text.split('\n');
+
+      const mergedText = lines.join(' ').replace(/\s+/g, ' ').toLowerCase();
+
+// Deteksi pola gabungan EISBN yang terpencar
+const scatteredEISBNPattern = /e\s*[\-–]?\s*isbn\s*[:\-]?\s*(97[89][\d\s\-–]{9,})(?:\s*\((EPUB|PDF)\))?/gi;
+const scatteredMatches = [...mergedText.matchAll(scatteredEISBNPattern)];
+
+for (const match of scatteredMatches) {
+  const nums = splitIntoIsbns(match[1]);
+  for (const n of nums) {
+    if (!eisbnList.includes(n)) eisbnList.push(n);
+    isbnList = isbnList.filter(x => x !== n); // remove duplikat
+  }
+}
+console.log('🔎 Gabungan teks untuk pencocokan EISBN tersebar:', mergedText);
+console.log('✅ Deteksi EISBN tersebar:', scatteredMatches.map(m => m[1]));
+
+
+      // 🔍 Gabungan teks paragraf untuk pencocokan multi-baris
+const paragraphText = lines.join(' ').replace(/\s+/g, ' ');
+
+// ✅ Deteksi pola gabungan: "ISBN :" lalu 978... (terpisah baris atau jarak)
+const isbnAfterLabel = [...paragraphText.matchAll(/ISBN\s*(Elektronis)?\s*[:\-]?\s*(97[89][\d\s\-–]{9,})(\s*\((EPUB|PDF)\))?/gi)];
+for (const match of isbnAfterLabel) {
+  const isE = match[1] || match[4]; // Jika ada kata Elektronis atau (PDF)/(EPUB)
+  const raw = match[2];
+  const nums = splitIntoIsbns(raw);
+  for (const n of nums) {
+    if (isE) {
+      if (!eisbnList.includes(n)) eisbnList.push(n);
+      isbnList = isbnList.filter(x => x !== n);
     } else {
-      if (!isbnList.includes(clean10) && !eisbnList.includes(clean10)) isbnList.push(clean10);
+      if (!isbnList.includes(n) && !eisbnList.includes(n)) isbnList.push(n);
     }
   }
 }
+console.log('📘 [DEBUG] ParagraphText:', paragraphText);
+console.log('📘 [DEBUG] Deteksi hasil pola gabungan:', isbnAfterLabel.map(m => m[2]));
 
+      // ✅ Deteksi eksplisit pola "ISBN : 978..." atau "E-ISBN : 978..."
+for (const line of lines) {
+  const isbnMatch = line.match(/^\s*ISBN\s*[:\-]?\s*(97[89][\d\s\-–]{9,})/i);
+  const eisbnMatch = line.match(/^\s*E[\- ]?ISBN\s*[:\-]?\s*(97[89][\d\s\-–]{9,})(?:\s*\((EPUB|PDF)\))?/i);
 
-          if (/EISBN\s*[:\-]?\s*/i.test(line)) previousLineISBN = 'EISBN';
-          else if (/ISBN\s*[:\-]?\s*/i.test(line)) previousLineISBN = 'ISBN';
-          else previousLineISBN = null;
-        }
+  if (isbnMatch) {
+    const nums = splitIntoIsbns(isbnMatch[1]);
+    for (const n of nums) {
+      if (!isbnList.includes(n) && !eisbnList.includes(n)) isbnList.push(n);
+    }
+  }
 
-        // 📌 Deteksi pola "(EPUB)" / "(PDF)"
-        const matches = [...text.matchAll(/(97[89][\d\s\-–]{9,})(?=\s*\(?(EPUB|PDF)\)?)/gi)];
-        for (const match of matches) {
-          const num = splitIntoIsbns(match[0])[0];
-          if (num && !eisbnList.includes(num)) {
-            eisbnList.push(num);
-            isbnList = isbnList.filter(x => x !== num); // hilangkan duplikasi
-          }
-        }
+  if (eisbnMatch) {
+    const nums = splitIntoIsbns(eisbnMatch[1]);
+    for (const n of nums) {
+      if (!eisbnList.includes(n)) eisbnList.push(n);
+    }
+    // Hapus dari ISBN list jika dobel
+    isbnList = isbnList.filter(x => !eisbnList.includes(x));
+  }
+}
 
-        // 📌 Fallback dari semua ISBN yang belum dipastikan
-        const fallbackMatches = [...text.matchAll(/(97[89][\d\s\-–]{9,})/g)];
-        for (const match of fallbackMatches) {
-          const raw = match[0];
-          const num = splitIntoIsbns(raw)[0];
-          const matchedLine = lines.find(line => line.includes(raw))?.toLowerCase() || '';
-          const nextLine = lines[lines.indexOf(matchedLine) + 1]?.toLowerCase() || '';
-          const combined = matchedLine + ' ' + nextLine;
-
-            const isEISBN = /(eisbn|\(epub\)|\(pdf\)|digital|elektronik|ebook|isbn\s*\[\s*e\s*\]|isbn\s*\(\s*e\s*\))/i.test(combined);
-
-
-          if (num) {
-            if (isEISBN) {
-              if (!eisbnList.includes(num)) {
-                eisbnList.push(num);
-                isbnList = isbnList.filter(x => x !== num);
-              }
-            } else {
-              if (!isbnList.includes(num) && !eisbnList.includes(num)) {
-                isbnList.push(num);
-              }
-            }
-          }
-
-        if (matches.length > 0 || eisbnList.length > 0) {
-          authorText = text;
-          if (i > 1) {
-            const prevPage = await pdf.getPage(i - 1);
-            const prevContent = await prevPage.getTextContent();
-            titleText = prevContent.items.map(item => item.str).join('\n');
-          }
+      const yearMatches = [...text.matchAll(/\b(19|20)\d{2}\b/g)];
+      for (const match of yearMatches) {
+        const context = text.substring(Math.max(0, match.index - 30), match.index + 30).toLowerCase();
+        if (/hak cipta|tahun terbit|©|copyright/i.test(context)) {
+          detectedYears.push(match[0]);
         }
       }
+      // ✅ Tambahkan di sini (deteksi E-ISBN seluruh halaman)
+  const eisbnMatches = [...text.matchAll(/E[\- ]?ISBN\s*[:\-]?\s*(97[89][\d\s\-–]{9,})(?:\s*\((EPUB|PDF)\))?/gi)];
+  if (eisbnMatches.length > 0) {
+  console.log(`✅ E-ISBN ditemukan di halaman ${i}:`, eisbnMatches.map(m => m[1]));
+}
+  for (const match of eisbnMatches) {
+    const raw = match[1];
+    const numbers13 = splitIntoIsbns(raw);
+    for (const num of numbers13) {
+      if (!eisbnList.includes(num)) eisbnList.push(num);
+      isbnList = isbnList.filter(x => x !== num);
+    }
+  }
 
-      const fallbackLines = (titleText || '').split('\n').slice(0, 5).map(line => line.trim()).filter(line => line.length > 5);
-      const isLikelyName = line => /dr\.|m\.|s\.|ag|skm|sp\.|mp\.h|biomed|s\.si/i.test(line);
-      const filteredTitleLines = fallbackLines.filter(line => !isLikelyName(line));
-      const fallbackTitle = normalizeSpacedText(filteredTitleLines.sort((a, b) => b.length - a.length)[0] || '');
 
-      const titleMatch = titleText.match(/Judul\s*[:\-]?\s*(.+?)(?=\n|Penulis|Editor|ISBN|$)/i);
-      const authorMatch = authorText.match(/Penulis\s*[:\-]?\s*(.+?)(?=\n|Editor|ISBN|$)/i);
-      const year = (metaDate.match(/\d{4}/) || [])[0] || '';
+      let previousLineISBN = null;
 
-      const parsed = {
-        title: metaTitle || (titleMatch ? titleMatch[1].trim() : fallbackTitle),
-        author: metaAuthor || (authorMatch ? authorMatch[1].trim() : ''),
-        year,
-        isbnList,
-        eisbnList
-      };
+for (let j = 0; j < lines.length; j++) {
+  const line = lines[j].trim();
+  const nextLine = lines[j + 1]?.trim() || '';
+  if (/ISBN\s*Elektronis\s*[:\-]?\s*(97[89][\d\s\-–]{9,})/i.test(line)) {
+    const match = line.match(/(97[89][\d\s\-–]{9,})/g);
+    const nums = match?.map(s => splitIntoIsbns(s)).flat() || [];
+    for (const n of nums) {
+      if (!eisbnList.includes(n)) eisbnList.push(n);
+      isbnList = isbnList.filter(x => x !== n);
+    }
+  }
 
-      outputEl.dataset.metadata = JSON.stringify({
-  title: parsed.title || '',
-  author: parsed.author || '',
-  year: parsed.year || '',
-  isbnList,
-  eisbnList,
-  bookmark: bookmarkInfo,
-  layout: layoutInfo
-});
-  
-      outputEl.textContent = `
+  console.log('📦 Baris teks ISBN/EISBN:', line);
+
+  // Deteksi apakah baris sebelumnya adalah label EISBN
+  if (/EISBN\s*[:\-]?\s*/i.test(line) || /ISBN\s*Elektronis\s*[:\-]?\s*/i.test(line) || /E-?SBN/i.test(line)) {
+    previousLineISBN = 'EISBN';
+  } else if (/ISBN\s*[:\-]?\s*/i.test(line)) {
+    previousLineISBN = 'ISBN';
+  }
+  const labelAndIsbnMatch = line.match(/(E[\- ]?ISBN|ISBN Elektronis)\s*[:\-]?\s*(97[89][\d\s\-–]{9,})(?:\s*\((EPUB|PDF)\))?/i);
+if (labelAndIsbnMatch) {
+  const rawIsbn = labelAndIsbnMatch[2];
+  const cleanList = splitIntoIsbns(rawIsbn);
+  for (const num of cleanList) {
+    if (!eisbnList.includes(num)) eisbnList.push(num);
+    isbnList = isbnList.filter(x => x !== num); // hindari duplikat
+  }
+}
+// Deteksi langsung pola "E-ISBN : 978... (PDF)"
+const labelAndEISBN = line.match(/E[\- ]?ISBN\s*[:\-]?\s*(97[89][\d\s\-–]{9,})(?:\s*\((EPUB|PDF)\))?/i);
+if (labelAndEISBN) {
+  const raw = labelAndEISBN[1];
+  const numbers13 = splitIntoIsbns(raw);
+  for (const num of numbers13) {
+    if (!eisbnList.includes(num)) eisbnList.push(num);
+    isbnList = isbnList.filter(x => x !== num); // Hindari duplikat
+  }
+  continue; // Lewati ke baris selanjutnya agar tidak dideteksi ulang
+}
+
+// Deteksi langsung pola "ISBN : 978..."
+const labelAndISBN = line.match(/\bISBN\b\s*[:\-]?\s*(97[89][\d\s\-–]{9,})/i);
+if (labelAndISBN) {
+  const raw = labelAndISBN[1];
+  const numbers13 = splitIntoIsbns(raw);
+  for (const num of numbers13) {
+    if (!isbnList.includes(num) && !eisbnList.includes(num)) isbnList.push(num);
+  }
+  continue;
+}
+
+
+  const matchISBN13 = line.match(/(97[89][\d\s\-–]{9,})/g) || [];
+  const matchISBN10 = line.match(/\b[\d]{9}[\dXx]\b/g) || [];
+  const allMatches = [...matchISBN13, ...matchISBN10];
+
+  // Deteksi kata kunci atau pola penanda EISBN
+  const isEISBN = /(eisbn|elektronik|e-?sbn|e-?isbn|digital|epub|ebook|\(epub\)|\(pdf\)|isbn\s*elektronis|isbn\s*\[\s*e\s*\]|isbn\s*\(\s*e\s*\))/i.test(line + nextLine);
+
+  for (const raw of allMatches) {
+    const numbers13 = splitIntoIsbns(raw);
+    const isISBN10 = isValidISBN10(raw);
+
+    if (numbers13.length > 0) {
+      for (const num of numbers13) {
+        if (isEISBN || previousLineISBN === 'EISBN') {
+          if (!eisbnList.includes(num)) eisbnList.push(num);
+        } else {
+          if (!isbnList.includes(num) && !eisbnList.includes(num)) isbnList.push(num);
+        }
+      }
+    } else if (isISBN10) {
+      const clean10 = raw.replace(/[\- ]/g, '').toUpperCase();
+      if (isEISBN || previousLineISBN === 'EISBN') {
+        if (!eisbnList.includes(clean10)) eisbnList.push(clean10);
+      } else {
+        if (!isbnList.includes(clean10) && !eisbnList.includes(clean10)) isbnList.push(clean10);
+      }
+    }
+  }
+}
+        const matches = [...text.matchAll(/(97[89][\d\s\-–]{9,})(?=\s*\(?(EPUB|PDF)\)?)/gi)];
+      if (matches.length > 0 || eisbnList.length > 0) {
+        authorText = text;
+        if (i > 1) {
+          const prevPage = await pdf.getPage(i - 1);
+          const prevContent = await prevPage.getTextContent();
+          titleText = prevContent.items.map(item => item.str).join('\n');
+        }
+      }
+    }
+
+    if (!year && detectedYears.length > 0) {
+      year = detectedYears[0];
+    }
+
+    const fallbackLines = (titleText || '').split('\n').slice(0, 5).map(line => line.trim()).filter(line => line.length > 5);
+    const isLikelyName = line => /dr\.|m\.|s\.|ag|skm|sp\.|mp\.h|biomed|s\.si/i.test(line);
+    const filteredTitleLines = fallbackLines.filter(line => !isLikelyName(line));
+    const fallbackTitle = normalizeSpacedText(filteredTitleLines.sort((a, b) => b.length - a.length)[0] || '');
+
+    const titleMatch = titleText.match(/Judul\s*[:\-]?\s*(.+?)(?=\n|Penulis|Editor|ISBN|$)/i);
+    const authorMatch = authorText.match(/Penulis\s*[:\-]?\s*(.+?)(?=\n|Editor|ISBN|$)/i);
+
+    const parsed = {
+      title: metaTitle || (titleMatch ? titleMatch[1].trim() : fallbackTitle),
+      author: metaAuthor || (authorMatch ? authorMatch[1].trim() : ''),
+      year,
+      isbnList,
+      eisbnList
+    };
+
+    
+    console.log('📦 Hasil akhir ISBN:', isbnList);
+    console.log('📦 Hasil akhir EISBN:', eisbnList);
+
+    outputEl.dataset.metadata = JSON.stringify({
+      title: parsed.title || '',
+      author: parsed.author || '',
+      year: parsed.year || '',
+      isbnList,
+      eisbnList,
+      bookmark: bookmarkInfo,
+      cover: coverInfo,
+      layout: layoutInfo,
+      properties: documentProperties
+    });
+    
+
+    outputEl.textContent = `
 📘 [Hasil Parsing dari PDF]
 ----------------------------
 Judul     : ${parsed.title || '(tidak ditemukan)'}
@@ -357,10 +588,11 @@ Tahun     : ${parsed.year || '(tidak ditemukan)'}
 ISBN      : ${parsed.isbnList.join(', ') || '(tidak ditemukan)'}
 EISBN     : ${parsed.eisbnList.join(', ') || '(tidak ditemukan)'}
 Bookmark  : ${bookmarkInfo}
+Cover     : ${coverInfo}
 Layout    : ${layoutInfo}
-      `.trim();
-    };
-  
+properties: ${documentProperties}
+    `.trim();
+
   } catch (err) {
     outputEl.textContent = `❌ Gagal membaca PDF: ${err.message}`;
   }
@@ -392,7 +624,7 @@ async function extractFromEPUB(file, outputEl) {
       const id = el.textContent.trim();
       if (isbnRegex.test(id)) {
         const num = id.match(isbnRegex)[1].replace(/[\s–\-]/g, '');
-        if (/epub|pdf|ebook|elektronik|digital|eisbn|isbn\s*\[e\]/i.test(id)) {
+        if (/epub|pdf|e-sbn|e-isbn|ebook|elektronik|digital|eisbn|isbn\s*\[e\]/i.test(id)) {
           eisbn = num;
         } else {
           isbn = num;
@@ -414,7 +646,7 @@ async function extractFromEPUB(file, outputEl) {
       const tocText = await zip.file(tocFile).async("string");
       const tocDoc = parser.parseFromString(tocText, "text/xml");
       const navPoints = tocDoc.getElementsByTagName("navPoint");
-      const requiredKeywords = ['hak cipta', 'credit title', 'impressum', 'katalog dalam terbitan [kdt]', 'kdt', 'halaman copyright', 'halaman impresum', 'impresum'];
+      const requiredKeywords = ['hak cipta', 'credit title', 'impressum', 'katalog dalam terbitan [kdt]', 'kdt', 'halaman copyright', 'halaman impressum', 'halaman impresum', 'impresum', 'identitas buku', 'copyright', 'tahun terbit dan ISBN (PDF)'];
 
       for (let nav of navPoints) {
         const text = nav.getElementsByTagName("text")[0]?.textContent.toLowerCase() || '';
@@ -449,7 +681,6 @@ EISBN   : ${eisbn || uuid || '(tidak ditemukan)'}
     outputEl.textContent = `❌ Gagal membaca metadata EPUB: ${err.message}`;
   }
 }
-
   </script>
 </body>
 </html>
