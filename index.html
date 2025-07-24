@@ -106,7 +106,7 @@ function exportToExcel() {
   const ws = XLSX.utils.aoa_to_sheet([
     [
       'UUID', 'URL', 'Judul', 'Penulis', 'Tahun', 'ISBN', 'EISBN',
-      'Bookmark', 'Cover', 'Layout', 'Properties',
+      'Bookmark', 'Cover', 'Layout', 'Properties', 'Scan/Teks', 
       'Status QC', 'Catatan QC'
     ],
     ...hasilEkstraksi
@@ -181,6 +181,7 @@ async function extractMetadataFromExcel() {
             meta.cover,
             meta.layout,
             meta.properties,
+            meta.scanStatus ||'',
             hasilPerbandingan.status,
             hasilPerbandingan.catatan
           ]);
@@ -331,7 +332,17 @@ async function extractFromPDF(fileOrUrl, outputEl, isUrl = false) {
     } catch (e) {
       layoutInfo = `⚠️ Gagal membaca ukuran layout: ${e.message}`;
     }
- 
+        // 📌 Deteksi apakah PDF merupakan hasil scan (tidak ada teks sama sekali)
+let halamanTeks = 0;
+for (let i = 1; i <= pdf.numPages; i++) {
+  const page = await pdf.getPage(i);
+  const content = await page.getTextContent();
+  const textItems = content.items.map(item => item.str).filter(t => t.trim().length > 0);
+  if (textItems.length > 0) halamanTeks++;
+}
+const isOCR = halamanTeks / pdf.numPages > 0.4;
+const scanInfo = isOCR ? '📝 OCR / Teks tersedia' : '🖼️ Scan / Gambar saja';
+
 
     // 📚 Metadata & Konten
     const docInfo = metadata.info || {};
@@ -575,7 +586,8 @@ if (labelAndISBN) {
       bookmark: bookmarkInfo,
       cover: coverInfo,
       layout: layoutInfo,
-      properties: documentProperties
+      properties: documentProperties,
+      scanStatus: scanInfo
     });
     
 
@@ -591,6 +603,7 @@ Bookmark  : ${bookmarkInfo}
 Cover     : ${coverInfo}
 Layout    : ${layoutInfo}
 properties: ${documentProperties}
+Scan/Teks : ${scanInfo}
     `.trim();
 
   } catch (err) {

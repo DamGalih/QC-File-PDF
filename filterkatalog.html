@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <title>📚 Filter Katalog Excel per Sheet</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+</head>
+<body>
+  <h2>📚 Filter Katalog Excel (Per Sheet → Gabung Saat Download)</h2>
+
+  <input type="file" id="input-excel" />
+  <br/><br/>
+  <label>📄 Pilih Sheet:</label>
+  <select id="sheet-selector"></select>
+  <br/><br/>
+
+  <label>Referensi:</label>
+  <input type="text" id="referensi-filter" placeholder="Contoh: Perguruan Tinggi" />
+  <label>Harga (min - maks):</label>
+  <input type="number" id="harga-min" value="50000" />
+  <input type="number" id="harga-maks" value="100000" />
+  <label>Tahun Terbit (pisah koma):</label>
+  <input type="text" id="tahun-filter" value="2021,2022,2023" />
+  <button onclick="filterData()">🔍 Filter</button>
+  <button onclick="downloadExcel()">⬇️ Download Semua Hasil</button>
+
+  <div id="info" style="margin-top:10px; font-weight: bold;"></div>
+  <div id="table-container" style="margin-top:20px;"></div>
+
+  <script>
+    let workbook, filteredSheets = {};
+
+    document.getElementById('input-excel').addEventListener('change', function (e) {
+      const reader = new FileReader();
+      reader.onload = function (e) {
+        const dataArray = new Uint8Array(e.target.result);
+        workbook = XLSX.read(dataArray, { type: 'array' });
+        const sheetSelector = document.getElementById('sheet-selector');
+        sheetSelector.innerHTML = '';
+        workbook.SheetNames.forEach(name => {
+          const option = document.createElement('option');
+          option.value = name;
+          option.textContent = name;
+          sheetSelector.appendChild(option);
+        });
+        filteredSheets = {}; // Reset hasil filter
+        document.getElementById('info').textContent = "✅ File dimuat. Silakan pilih sheet dan lakukan filter.";
+        document.getElementById('table-container').innerHTML = '';
+      };
+      reader.readAsArrayBuffer(e.target.files[0]);
+    });
+
+    function filterData() {
+      const sheetName = document.getElementById('sheet-selector').value;
+      const referensi = document.getElementById('referensi-filter').value.toLowerCase();
+      const hargaMin = parseFloat(document.getElementById('harga-min').value) || 0;
+      const hargaMax = parseFloat(document.getElementById('harga-maks').value) || Infinity;
+      const tahunList = document.getElementById('tahun-filter').value.split(',').map(y => y.trim());
+
+      const sheet = workbook.Sheets[sheetName];
+      const json = XLSX.utils.sheet_to_json(sheet);
+
+      const filtered = json.filter(row => {
+        const harga = parseFloat(row['HARGA SATUAN']) || 0;
+        const tahun = String(row['Tahun Terbit Digital'] || '').trim();
+        return (
+          String(row['Referensi'] || '').toLowerCase().includes(referensi) &&
+          harga >= hargaMin && harga <= hargaMax &&
+          tahunList.includes(tahun)
+        );
+      });
+
+      if (filtered.length > 0) {
+        filteredSheets[sheetName] = filtered;
+        showTable(filtered);
+        document.getElementById('info').textContent = `✅ ${filtered.length} data ditemukan di sheet "${sheetName}" dan disimpan untuk ekspor.`;
+      } else {
+        document.getElementById('info').textContent = `❌ Tidak ada data ditemukan di sheet "${sheetName}".`;
+        document.getElementById('table-container').innerHTML = '';
+      }
+    }
+
+    function showTable(data) {
+      const container = document.getElementById('table-container');
+      container.innerHTML = '';
+      if (data.length === 0) return;
+
+      const table = document.createElement('table');
+      table.border = 1;
+      table.style.borderCollapse = 'collapse';
+      const thead = document.createElement('thead');
+      const tbody = document.createElement('tbody');
+      const headers = Object.keys(data[0]);
+
+      const headRow = document.createElement('tr');
+      headers.forEach(h => {
+        const th = document.createElement('th');
+        th.textContent = h;
+        th.style.padding = '5px';
+        headRow.appendChild(th);
+      });
+      thead.appendChild(headRow);
+
+      data.forEach(row => {
+        const tr = document.createElement('tr');
+        headers.forEach(h => {
+          const td = document.createElement('td');
+          td.textContent = row[h];
+          td.style.padding = '5px';
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+
+      table.appendChild(thead);
+      table.appendChild(tbody);
+      container.appendChild(table);
+    }
+
+    function downloadExcel() {
+      if (Object.keys(filteredSheets).length === 0) {
+        alert("Belum ada hasil filter yang bisa diunduh!");
+        return;
+      }
+
+      const wb = XLSX.utils.book_new();
+
+      for (const [sheetName, data] of Object.entries(filteredSheets)) {
+        const ws = XLSX.utils.json_to_sheet(data);
+        // Sheet name max 31 karakter
+        const safeName = sheetName.slice(0, 31);
+        XLSX.utils.book_append_sheet(wb, ws, safeName);
+      }
+
+      XLSX.writeFile(wb, "hasil_filter_per_sheet.xlsx");
+    }
+  </script>
+</body>
+</html>

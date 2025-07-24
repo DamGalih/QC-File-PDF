@@ -48,5 +48,5 @@ def list_files_to_excel(folder_id, output_file='drive_links_only.xlsx'):
         print(f"❌ Terjadi kesalahan: {error}")
 
 # Ganti dengan folder ID kamu
-folder_id = '18XAajk2QCjfhb2XG1yiDzu9sowFwxS78'
+folder_id = '17TN5QcoC55F7Ue7Y6oOX2Ph6v3Nd5TqW'
 list_files_to_excel(folder_id)
